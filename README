@@ -1,9 +1,19 @@
 Simple-Cache
 
+Background:
+-----------
+
+
 Installation:
 -------------
 
+1.
+Download the latest version of erlang for your system.  The downloads page is here:
 
+http://www.erlang.org/download.html
+
+You can select from any number of recent versions of erlang.  This was originally developed
+on version R13B04, then on R14B04.  
 
 Running:
 --------
