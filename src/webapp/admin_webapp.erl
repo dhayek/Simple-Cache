@@ -159,8 +159,8 @@ do(["add-context"], Arg) ->
 			      header_value = Value,
 			      use_secure = UseSecure,
 			      default_ttl = erlang:list_to_integer(TTL),
-			      memory_allocation = erlang:list_to_integer(MemoryAlloc),
-			      node_fragments = cache:getNodeList()
+			      memory_allocation = erlang:list_to_integer(MemoryAlloc)
+			      %%node_fragments = cache:getNodeList()
 			     },
 			    cache:createContext(ContextRecord),
 			    {redirect_local, "/cache/cache-summary"};
@@ -174,8 +174,8 @@ do(["add-context"], Arg) ->
 		      header_value = "",
 		      use_secure = UseSecure,
 		      default_ttl = erlang:list_to_integer(yaws_api:postvar(Arg, "ttl")),
-		      memory_allocation = erlang:list_to_integer(yaws_api:postvar(Arg, "memory-allocation")),
-		      node_fragments = cache:getNodeList()
+		      memory_allocation = erlang:list_to_integer(yaws_api:postvar(Arg, "memory-allocation"))
+		      %%node_fragments = cache:getNodeList()
 		     },
 		    cache:createContext(ContextRecordNoHeader),
 		    {redirect_local, "/cache/cache-summary"}

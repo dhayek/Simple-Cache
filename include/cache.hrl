@@ -10,6 +10,11 @@
 
 -define(CACHE_RECORD_DATA, [key, data, store_time, last_access_time, ttl, expire_time]).
 
+-define(CACHE_LOOKUP_RECORD_DATA, [key, table_name]).  %% key = {<<"Context Name">>, <<"Key">>}, table_name = <<"Table Name">>
+
+-define(CACHE_LOOKUP_TABLE_PREFIX, "cache_lookup_").
+
+
 -record(cache_data, {
 	  key,               %% string value
 	  data,              %% arbitrary binary data
@@ -28,8 +33,7 @@
 	  header_value,        %% http header value for authentication.  The http header x-icache-header of the caller needs to be set to this
 	  use_secure,          %% boolean indicating whether these need to be secure transactions
 	  default_ttl,         %% in seconds, how long should the cache data be stored
-	  memory_allocation,   %% memory, in bytes, to be used for this context
-	  node_fragments       %% list of tuples of the atoms:  {Node, Fragment} eg {'node1@host1', context1_fragment_(hash(Node))} 
+	  memory_allocation   %% memory, in bytes, to be used for this context
 	}
 ).
 
@@ -39,6 +43,15 @@
 	  table_fragment,      %% atom representing the table itself
 	  memory_use = 0
 	}
+).
+
+
+-record(table_lookup,
+		{
+		  key,            %% tuple with the format { ContextName, Key }
+		  table_name      %% string value for the table where the data for this
+                                  %% context and key is located  
+		 }
 ).
 
 
@@ -56,7 +69,10 @@
 -record(node_list, 
 	{
 	  key = 0,
-	  node_list
+	  node_list,               %% list of tuples of the form {node1@www.xxx.yyy.zzz, node2@aaa.bbb.ccc.ddd, ...}
+                                   %% Each tuple contains the primary and backup node.  Note that there may be zero or
+                                   %% more backup nodes.
+	  lookup_node_list
 	}
 ).
 

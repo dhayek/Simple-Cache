@@ -511,7 +511,8 @@ getCacheContextUseSummary(ContextName) ->
 		end
 	end,    
     DataList = 
-	lists:foldl(fun(Node, NodeDataList) ->
+	lists:foldl(fun(NodeTuple, NodeDataList) ->
+			    Node = erlang:element(1, NodeTuple),
 			    TableFragmentName = cache:createTableFragmentName(ContextName, Node),
 			    Table = cache:getContextAtom(TableFragmentName),
 			    {MemoryOverhead, MemUse} = getCacheContextMemoryAtTable(TableFragmentName, Table),
@@ -558,8 +559,8 @@ getCacheContextMemoryUse(ContextName) ->
 		end
 	end,
 
-    lists:foldl(fun(Node, {OverHeadMemory, ObjectMemory}) ->
-			TableFragmentName = cache:createTableFragmentName(ContextName, Node),
+    lists:foldl(fun(NodeTuple, {OverHeadMemory, ObjectMemory}) ->
+			TableFragmentName = cache:createTableFragmentName(ContextName, erlang:element(1, NodeTuple)),
 			MemUse = case getMemoryUse(TableFragmentName) of
 				     M when erlang:is_integer(M) ->
 					 M;
