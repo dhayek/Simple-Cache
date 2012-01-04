@@ -10,9 +10,9 @@
 
 -define(CACHE_RECORD_DATA, [key, data, store_time, last_access_time, ttl, expire_time]).
 
--define(CACHE_LOOKUP_RECORD_DATA, [key, table_name]).  %% key = {<<"Context Name">>, <<"Key">>}, table_name = <<"Table Name">>
+-define(CACHE_LOOKUP_RECORD_DATA, [key, table_name]).  %% key =  <<"Key">>, table_name = <<"Table Name">>
 
--define(CACHE_LOOKUP_TABLE_PREFIX, "cache_lookup_").
+-define(CACHE_LOOKUP_TABLE_PREFIX, "cache_lookup").
 
 
 -record(cache_data, {
@@ -48,7 +48,7 @@
 
 -record(table_lookup,
 		{
-		  key,            %% tuple with the format { ContextName, Key }
+		  key,            %% <<"Key value">>
 		  table_name      %% string value for the table where the data for this
                                   %% context and key is located  
 		 }

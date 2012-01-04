@@ -22,13 +22,14 @@ init() ->
     case ListOfNodeTuples of
 	{error, Message} ->
 	    erlang:exit(Message);
-	 {NodeListTuples, LookupNodeListTuples, _} ->
-	   
-	    case areMutuallyExclusive(NodeListTuples, LookupNodeListTuples) of
+	 {NodeListTuples, LookupNodeListTuples, ListOfContexts} ->
+	    NodeList = getNodeListFromConfig(NodeListTuples),
+	    LookupNodeList = getNodeListFromConfig(LookupNodeListTuples),
+	    case areMutuallyExclusive(NodeList, LookupNodeList) of
 		false ->
 		    erlang:exit("The nodes used for the cache contain some members from the nodes used for lookup.");
 		true ->
-		    AllNodes =   getAllNodesFromTuples(NodeListTuples, LookupNodeListTuples),
+		    AllNodes = NodeList ++ LookupNodeList,
 		    case allNodesConnected(AllNodes) of
 			false ->
 			    erlang:exit("All nodes are not connectable.");
@@ -45,35 +46,46 @@ init() ->
 							 current_number_of_nodes = length(AllNodes),
 							 nodes_running_reorg = 0},
 			    mnesia:dirty_write(cache_reorg, CacheReorgRec),
+			    lists:foreach(fun(ContextConfig) ->
+						  {ContextName, UseHeader, HeaderValue, UseSecure, DefaultTTL, MemoryAllocation} = ContextConfig,
+						  ContextRec = #context{
+						    context_name = ContextName,
+						    use_header = UseHeader,
+						    header_value = HeaderValue,
+						    use_secure = UseSecure,
+						    default_ttl = DefaultTTL,
+						    memory_allocation = MemoryAllocation},
+						  ?MODULE:createContext(ContextRec),
+						  createCacheLookupTables(ContextName, LookupNodeListTuples)
+					  end,
+					  ListOfContexts)
 			    %%lists:foreach(fun(Node) ->
 			%%			  rpc:call(Node, cache_monitor, start, [])
 			%%		  end,
 			%%		  AllNodes),
-			    lists:foreach(fun(Tuple) ->
-						  createCacheLookupTable(Tuple)
-					  end,
-					  LookupNodeListTuples
-					 )
 		    end
 	    end
     end
 .
 
-createCacheLookupTable(Tuple) ->
-    ListOfNodes = erlang:tuple_to_list(Tuple),
-    FirstNode = lists:nth(1, ListOfNodes), 
-    TableName = getCacheLookupRecordTable(FirstNode), 
-    mnesia:create_table(TableName,
-			[
-			 {ram_copies, ListOfNodes},
-			 {attributes, ?CACHE_LOOKUP_RECORD_DATA}
-			]
-		       )
+createCacheLookupTables(ContextName, ListOfLookupNodeTuples) ->
+    lists:foreach(fun(LookupNodeTuple) ->
+			  {NodeKey, ListOfNodes} = LookupNodeTuple,
+			  Table = getCacheLookupRecordTable(ContextName, NodeKey),
+			  mnesia:create_table(Table,
+					      [
+					       {ram_copies, ListOfNodes},
+					       {attributes, ?CACHE_LOOKUP_RECORD_DATA}
+					      ]
+					     )
+		  end,
+		  ListOfLookupNodeTuples
+		 )
 .
 
-getCacheLookupRecordTable(Node) ->
-    StrTableName = ?CACHE_LOOKUP_TABLE_PREFIX ++ erlang:integer_to_list(erlang:phash2(Node, 1000000000)),
-    TableName = listToAtom(StrTableName)
+getCacheLookupRecordTable(ContextName, NodeKey) ->
+    StrTableName = ?CACHE_LOOKUP_TABLE_PREFIX ++ "_" ++ ContextName ++ "_" ++ NodeKey,
+    Table = listToAtom(StrTableName)
 .
 
 initForceNew() ->
@@ -82,7 +94,7 @@ initForceNew() ->
 	{error, Message} ->
 	    erlang:exit(Message);
 	{NodeListTuples, LookupNodeListTuples, _} ->
-	    AllNodes = getAllNodesFromTuples(NodeListTuples, LookupNodeListTuples),
+	    AllNodes = getAllNodesFromConfigTuples(NodeListTuples, LookupNodeListTuples),
 	    lists:foreach(fun(Node) ->
 				  rpc:call(Node, cache_monitor, stop, []),
 				  rpc:call(Node, mnesia, stop, [])
@@ -104,7 +116,7 @@ start() ->
 		false ->
 		    erlang:exit("The nodes used for the cache contain some members from the nodes used for lookup.");
 		true ->
-		    ListOfNodes =   getAllNodesFromTuples(NodeListTuples, LookupNodeListTuples),
+		    ListOfNodes =   getAllNodesFromConfigTuples(NodeListTuples, LookupNodeListTuples),
 		    StartStatus = start(ListOfNodes),
 		    case StartStatus of 
 			{error, Message} ->
@@ -144,17 +156,7 @@ stop() ->
 %%    {delete_node, node()} ! stop
 .
 
-areMutuallyExclusive(NodeListTuples, LookupNodeListTuples) when is_list(NodeListTuples) and is_list (LookupNodeListTuples) ->
-    L1 = lists:foldl(fun(NodeTuple, Acc) -> 
-			     Nodes = tuple_to_list(NodeTuple),
-			     Acc ++ Nodes
-		     end, 
-		     [], NodeListTuples),
-    L2 = lists:foldl(fun(NodeTuple, Acc) -> 
-			     Nodes = tuple_to_list(NodeTuple),
-			     Acc ++ Nodes
-		     end, 
-		     [], LookupNodeListTuples),
+areMutuallyExclusive(L1, L2) when is_list(L1) and is_list (L2) ->
     lists:foldl(fun(Node, IsMutuallyExclusive) ->
 			case IsMutuallyExclusive of
 			    false ->
@@ -167,13 +169,21 @@ areMutuallyExclusive(NodeListTuples, LookupNodeListTuples) when is_list(NodeList
 		L2)
 .
 
-getAllNodesFromTuples(NodeListTuples, LookupNodeListTuples) ->
+getNodeListFromConfig(NodeListTuples) ->
+    NodeList = lists:foldl(fun(ConfigTuple, Acc) ->
+				   {_, List} = ConfigTuple,
+				   Acc ++ List
+			   end,
+			   [],
+			   NodeListTuples)
+.
+getAllNodesFromConfigTuples(NodeListTuples, LookupNodeListTuples) ->
     AllNodeTuples = lists:merge(NodeListTuples, LookupNodeListTuples),
     ListOfNodes = lists:foldl(fun(NodeTuple, Acc) -> 
-					       Nodes = tuple_to_list(NodeTuple),
-					       Acc ++ Nodes
-				       end, 
-				       [], AllNodeTuples)
+				      {_, L} = NodeTuple,
+				      Acc ++ L
+			      end, 
+			      [], AllNodeTuples)
 .
 
 getListOfNodeTuples() ->
@@ -209,9 +219,10 @@ initTableFragmentMemoryData() ->
     ListOfContexts = getAllContexts(),
     lists:foreach(
       fun(NodeTuple) ->
+	      {NodeKey, NodeList} = NodeTuple,
 	      lists:foreach(
 		fun(ContextName) ->
-			TableFragmentName = createTableFragmentName(ContextName, erlang:element(1, NodeTuple)),
+			TableFragmentName = createTableFragmentName(ContextName, NodeKey),
 			Table = ?MODULE:getContextAtom(TableFragmentName),
 			TableFragmentMemoryRec = 
 			    #table_fragment_memory {
@@ -268,6 +279,7 @@ put(ContextName, Key, Data, TTL) ->
     TableFragment = erlang:element(1, CacheData),
     TableFragmentName = erlang:atom_to_list(TableFragment),
     DataSize = size(Data),
+    NodeListRec = getNodeListRecord(),
     Fun = fun() ->
 		  mnesia:write(CacheData),
 		  [FragMemoryRec] = mnesia:read(table_fragment_memory, TableFragmentName),
@@ -275,7 +287,6 @@ put(ContextName, Key, Data, TTL) ->
 		  MemUse = CurrMemUse + DataSize,
 		  NewFragMemoryRec = FragMemoryRec#table_fragment_memory{memory_use = MemUse},
 		  mnesia:write(NewFragMemoryRec),		  
-		  [NodeListRec] = mnesia:read(node_list, 0),		  
 		  LookupCacheRecord = createLookupCacheDataRecord(ContextName, Key, TableFragmentName, NodeListRec#node_list.lookup_node_list),
 		  mnesia:write(LookupCacheRecord)
 	  end,
@@ -299,26 +310,26 @@ put(ContextName, Key, Data, TTL) ->
 
 
 
-put(ContextName, Key, Data, TTL, NodeList) ->
-    CacheData = createCacheDataRecord(ContextName, Key, Data, TTL, NodeList),
-    TableFragment = erlang:element(1, CacheData),
-    TableFragmentName = erlang:atom_to_list(TableFragment),
-    DataSize = size(Data),
-    Fun = fun() ->
-		  mnesia:write(CacheData),
-		  %%io:format("Cache data is ~p~n", [CacheData]),
-		  [FragMemoryRec] = mnesia:read(table_fragment_memory, TableFragmentName),
-		  CurrMemUse = FragMemoryRec#table_fragment_memory.memory_use,
-		  MemUse = CurrMemUse + DataSize,
-		  %%io:format("Curr mem use ~p;  Data size ~p~n", [CurrMemUse, DataSize]),
-		  NewFragMemoryRec = FragMemoryRec#table_fragment_memory{memory_use = MemUse},
-		  mnesia:write(NewFragMemoryRec),
-		  [NodeListRec] = mnesia:read(node_list, 0),		  
-		  LookupCacheRecord = createLookupCacheDataRecord(ContextName, Key, TableFragmentName, NodeListRec#node_list.lookup_node_list),
-		  mnesia:write(LookupCacheRecord)
-	  end,
-    mnesia:transaction( Fun )
-.
+%%put(ContextName, Key, Data, TTL, NodeList) ->
+%%    CacheData = createCacheDataRecord(ContextName, Key, Data, TTL, NodeList),
+%%    TableFragment = erlang:element(1, CacheData),
+%%    TableFragmentName = erlang:atom_to_list(TableFragment),
+%%    DataSize = size(Data),
+%%    NodeListRec = getNodeListRecord(),
+%%    Fun = fun() ->
+%%		  mnesia:write(CacheData),
+%%		  %%io:format("Cache data is ~p~n", [CacheData]),
+%%		  [FragMemoryRec] = mnesia:read(table_fragment_memory, TableFragmentName),
+%%		  CurrMemUse = FragMemoryRec#table_fragment_memory.memory_use,
+%%		  MemUse = CurrMemUse + DataSize,
+%%		  %%io:format("Curr mem use ~p;  Data size ~p~n", [CurrMemUse, DataSize]),
+%%		  NewFragMemoryRec = FragMemoryRec#table_fragment_memory{memory_use = MemUse},
+%%		  mnesia:write(NewFragMemoryRec),
+%%		  LookupCacheRecord = createLookupCacheDataRecord(ContextName, Key, TableFragmentName, NodeListRec#node_list.lookup_node_list),
+%%		  mnesia:write(LookupCacheRecord)
+%%	  end,
+%%    mnesia:transaction( Fun )
+%%.
 
 
 putFragRecord(FragmentRecord, TableFragmentName) ->
@@ -433,27 +444,28 @@ createCacheDataRecord(ContextName, Key, Data, TTL, ListOfNodes) ->
 .
 
 %% ContextName, Key, and TableName are all strings
-createLookupCacheDataRecord(ContextName, Key, TableName, ListOfLookupNodes) ->
-    ListSize = length(ListOfLookupNodes),
+createLookupCacheDataRecord(ContextName, Key, TableName, ListOfLookupNodeTuples) ->
+    ListSize = length(ListOfLookupNodeTuples),
     HashIndex = erlang:phash2(ContextName ++ Key, ListSize) + 1,
-    NodeTuple = lists:nth(HashIndex, ListOfLookupNodes),
-    Node = erlang:element(1, NodeTuple),
-    Table = getCacheLookupRecordTable(Node),
+    NodeTuple = lists:nth(HashIndex, ListOfLookupNodeTuples),
+    {NodeKey, NodeList} = NodeTuple,
+    Table = getCacheLookupRecordTable(ContextName, NodeKey),
     {
       Table,
-      {erlang:list_to_binary(ContextName), erlang:list_to_binary(Key)},
+      erlang:list_to_binary(Key),
       erlang:list_to_binary(TableName)
     }
 .
 
 
 %% [key, data, store_time, last_access_time, ttl, expire_time]
-createRehashedCacheDataRecord(ContextName, CacheDataRecord, ListOfNodes) ->
+createRehashedCacheDataRecord(ContextName, CacheDataRecord, ListOfNodeTuples) ->
     {OldTable, Key, Data, StoreTime, LastAccessTime, TTL, ExpireTime} = CacheDataRecord,
-    ListSize = length(ListOfNodes),
+    ListSize = length(ListOfNodeTuples),
     HashIndex = erlang:phash2(Key, ListSize) + 1,
-    NodeTuple = lists:nth(HashIndex, ListOfNodes),
-    TableFragmentName = createTableFragmentName(ContextName, erlang:element(1, NodeTuple)),
+    NodeTuple = lists:nth(HashIndex, ListOfNodeTuples),
+    {NodeKey, NodeList} = NodeTuple,
+    TableFragmentName = createTableFragmentName(ContextName, NodeKey),
     Table = ?MODULE:getContextAtom(TableFragmentName),
 
     NewCacheData = {
@@ -503,10 +515,10 @@ get(ContextName, Key) ->
     NodeListRec = getNodeListRecord(),
     ListSize = length(NodeListRec#node_list.lookup_node_list),
     HashIndex = erlang:phash2(ContextName ++ Key, ListSize) + 1,
-    NodeTuple = lists:nth(HashIndex, NodeListRec#node_list.lookup_node_list),
-    Node = erlang:element(1, NodeTuple),
-    LookupTable = getCacheLookupRecordTable(Node),
-    LookupRecordList = mnesia:dirty_read(LookupTable, {erlang:list_to_binary(ContextName), erlang:list_to_binary(Key)}),
+    LookupNodeTuple = lists:nth(HashIndex, NodeListRec#node_list.lookup_node_list),
+    {LookupNodeKey, LookupNodeList} = LookupNodeTuple,
+    LookupTable = getCacheLookupRecordTable(ContextName, LookupNodeKey),
+    LookupRecordList = mnesia:dirty_read(LookupTable, erlang:list_to_binary(Key)),
     case LookupRecordList of
 	[] ->
 	    undefined;
@@ -529,27 +541,27 @@ get(ContextName, Key) ->
     end
 .
 
-get(ContextName, Key, ListOfNodes) ->
-    ContextRec = ?MODULE:getContextRecord(ContextName),
-    ListSize = length(ListOfNodes),
-    HashIndex = erlang:phash2(Key, ListSize) + 1,
-    NodeTuple = lists:nth(HashIndex, ListOfNodes),
-    TableFragmentName = createTableFragmentName(ContextName, erlang:element(1, NodeTuple)),
-    Table = ?MODULE:getContextAtom(TableFragmentName),
-
-    Fun = fun() ->
-		  mnesia:read(Table, Key)
-	  end,
-    Result = mnesia:transaction( Fun ),
-
-    case Result of
-	{atomic, [Data | _ ]} ->
-	    RetVal = erlang:element(3, Data),
-	    RetVal;
-	_ ->
-	    undefined
-    end
-.
+%%get(ContextName, Key, ListOfNodes) ->
+%%    ContextRec = ?MODULE:getContextRecord(ContextName),
+%%    ListSize = length(ListOfNodes),
+%%    HashIndex = erlang:phash2(Key, ListSize) + 1,
+%%    NodeTuple = lists:nth(HashIndex, ListOfNodes),
+%%    TableFragmentName = createTableFragmentName(ContextName, erlang:element(1, NodeTuple)),
+%%    Table = ?MODULE:getContextAtom(TableFragmentName),
+%%
+%%    Fun = fun() ->
+%%		  mnesia:read(Table, Key)
+%%	  end,
+%%    Result = mnesia:transaction( Fun ),
+%%
+%%    case Result of
+%%	{atomic, [Data | _ ]} ->
+%%	    RetVal = erlang:element(3, Data),
+%%	    RetVal;
+%%	_ ->
+%%	    undefined
+%%    end
+%%.
 
 %%delete(ContextName, Key) ->
 %%    ReorgTuple = isCacheReorg(),
@@ -576,10 +588,10 @@ delete(ContextName, Key) ->
     NodeListRec = getNodeListRecord(),
     ListSize = length(NodeListRec#node_list.lookup_node_list),
     HashIndex = erlang:phash2(ContextName ++ Key, ListSize) + 1,
-    NodeTuple = lists:nth(HashIndex, NodeListRec#node_list.lookup_node_list),
-    Node = erlang:element(1, NodeTuple),
-    LookupTable = getCacheLookupRecordTable(Node),
-    LookupRecordList = mnesia:dirty_read(LookupTable, {erlang:list_to_binary(ContextName), erlang:list_to_binary(Key)}),
+    LookupNodeTuple = lists:nth(HashIndex, NodeListRec#node_list.lookup_node_list),
+    {NodeKey, NodeList} = LookupNodeTuple,
+    LookupTable = getCacheLookupRecordTable(ContextName, NodeKey),
+    LookupRecordList = mnesia:dirty_read(LookupTable, erlang:list_to_binary(Key)),
     case LookupRecordList of
 	[] ->
 	    noop;
@@ -588,7 +600,7 @@ delete(ContextName, Key) ->
 	    TableFragmentName = erlang:binary_to_list(CacheTableFragmentBin),
 	    Table = listToAtom(TableFragmentName),
 	    Fun = fun() ->
-			  mnesia:delete(LookupTable, {erlang:list_to_binary(ContextName), erlang:list_to_binary(Key)}, write),
+			  mnesia:delete(LookupTable, erlang:list_to_binary(Key), write),
 			  QueryRes = mnesia:read(Table, Key, write),
 			  case QueryRes of
 			      [ContextFragRec | _ ] ->
@@ -609,32 +621,32 @@ delete(ContextName, Key) ->
 .
 
 
-delete(ContextName, Key, ListOfNodes) ->
-    ContextRec = ?MODULE:getContextRecord(ContextName),    
-    ListSize = length(ListOfNodes),
-    HashIndex = erlang:phash2(Key, ListSize) + 1,
-    NodeTuple = lists:nth(HashIndex, ListOfNodes),
-    TableFragmentName = createTableFragmentName(ContextName, erlang:element(1, NodeTuple)),
-    Table = ?MODULE:getContextAtom(TableFragmentName),
-    
-    Fun = fun() ->
-		  QueryRes = mnesia:read(Table, Key, write),
-		  case QueryRes of
-		      [ContextFragRec | _ ] ->
-			  {_, _, Data, _, _, _, _} = ContextFragRec,
-			  DataSize = size(Data),
-			  mnesia:delete(Table, Key, write),
-			  [FragMemoryRec] = mnesia:read(table_fragment_memory, TableFragmentName),
-			  CurrMemUse = FragMemoryRec#table_fragment_memory.memory_use,
-			  MemUse = CurrMemUse - DataSize,
-			  NewFragMemoryRec = FragMemoryRec#table_fragment_memory{memory_use = MemUse},
-			  mnesia:write(NewFragMemoryRec);
-		      _ ->
-			  noop
-		  end
-	  end,
-    mnesia:transaction( Fun )
-.
+%%delete(ContextName, Key, ListOfNodes) ->
+%%    ContextRec = ?MODULE:getContextRecord(ContextName),    
+%%    ListSize = length(ListOfNodes),
+%%    HashIndex = erlang:phash2(Key, ListSize) + 1,
+%%    NodeTuple = lists:nth(HashIndex, ListOfNodes),
+%%    TableFragmentName = createTableFragmentName(ContextName, erlang:element(1, NodeTuple)),
+%%    Table = ?MODULE:getContextAtom(TableFragmentName),
+%%    
+%%    Fun = fun() ->
+%%		  QueryRes = mnesia:read(Table, Key, write),
+%%		  case QueryRes of
+%%		      [ContextFragRec | _ ] ->
+%%			  {_, _, Data, _, _, _, _} = ContextFragRec,
+%%			  DataSize = size(Data),
+%%			  mnesia:delete(Table, Key, write),
+%%			  [FragMemoryRec] = mnesia:read(table_fragment_memory, TableFragmentName),
+%%			  CurrMemUse = FragMemoryRec#table_fragment_memory.memory_use,
+%%			  MemUse = CurrMemUse - DataSize,
+%%			  NewFragMemoryRec = FragMemoryRec#table_fragment_memory{memory_use = MemUse},
+%%			  mnesia:write(NewFragMemoryRec);
+%%		      _ ->
+%%			  noop
+%%		  end
+%%	  end,
+%%    mnesia:transaction( Fun )
+%%.
 
 secs() ->
         T = now(),
@@ -655,29 +667,19 @@ createContext(ContextRecord) ->
 
 
 addContext(ContextName) ->
-    [NodeListRecord] = mnesia:dirty_read(node_list, 0),
+    NodeListRecord = getNodeListRecord(),
     lists:foreach(fun(NodeTuple) ->
-			  Node = erlang:element(1, NodeTuple),
-			  TableFragmentName = createTableFragmentName(ContextName, Node),
+			  {NodeKey, NodeList} = NodeTuple,
+			  TableFragmentName = createTableFragmentName(ContextName, NodeKey),
 			  Table = ?MODULE:getContextAtom(TableFragmentName),
 			  mnesia:create_table(
 			    Table,
 			    [
-			     {ram_copies, [Node]},
+			     {ram_copies, NodeList},
 			     {attributes, ?CACHE_RECORD_DATA},
 			     {index, [store_time, last_access_time, expire_time]}
 			    ]
 			   ),
-			  OtherNodes = 
-			      case erlang:tuple_size(NodeTuple) > 1 of
-				  true ->
-				      lists:sublist(tuple_to_list(NodeTuple), 2, erlang:tuple_size(NodeTuple));
-				  false ->
-				      []
-			      end,
-			  lists:foreach(fun(OtherNode) -> 
-						mnesia:add_table_copy(Table, OtherNode, ram_copies)
-					end, OtherNodes),
 			  TableFragmentMemoryRec = 
 			      #table_fragment_memory {
 			    table_fragment_name = TableFragmentName,
@@ -690,21 +692,42 @@ addContext(ContextName) ->
 			  mnesia:transaction(FragFun)			      
 		  end,
 		  NodeListRecord#node_list.node_list
-		 )	  
-	.
+		 ),
+    lists:foreach(fun(LookupNodeTuple) ->
+			  {LookupKey, LookupNodeList} = LookupNodeTuple,
+			  LookupTable = getCacheLookupRecordTable(ContextName, LookupKey),
+			  mnesia:create_table(
+			    LookupTable,
+			    [
+			     {ram_copies, LookupNodeList},
+			     {attributes, ?CACHE_LOOKUP_RECORD_DATA}
+			    ]
+			   )
+		  end,
+		  NodeListRecord#node_list.lookup_node_list
+		 )
+.
 
 %% ContextName : string()
 %% Node : atom()
-createTableFragmentName(ContextName, Node) ->
-    ContextName ++ "_fragment_" ++ erlang:integer_to_list(erlang:phash2(Node, 1000000000))
+createTableFragmentName(ContextName, NodeKey) ->
+    ContextName ++ "_fragment_" ++ NodeKey
+.
+createLookupTableFragmentName(ContextName, NodeKey) ->
+    ?CACHE_LOOKUP_TABLE_PREFIX ++ "_" ++ ContextName ++ "_" ++ NodeKey
 .
 
 
-
 deleteContext(ContextName) ->
-    [NodeListRecord] = mnesia:dirty_read(node_list, 0),
-    lists:foreach(fun(Node) ->
-			  TableFragmentName = createTableFragmentName(ContextName, erlang:element(1, Node)),
+    NodeListRecord = getNodeListRecord(),
+    lists:foreach(fun({LookupNodeKey, LookupNodeList}) ->
+			  LookupTable = getCacheLookupRecordTable(ContextName, LookupNodeKey),
+			  mnesia:delete_table(LookupTable)
+		  end,
+		  NodeListRecord#node_list.lookup_node_list
+		 ),
+    lists:foreach(fun({NodeKey, NodeList}) ->
+			  TableFragmentName = createTableFragmentName(ContextName, NodeKey),
 			  Table = ?MODULE:getContextAtom(TableFragmentName),
 			  mnesia:delete_table(Table),
 			  DelFun = fun() ->
@@ -736,28 +759,15 @@ clearAllData() ->
 
 
 clearContextData(ContextName) ->
-    [NodeListRecord] = mnesia:dirty_read(node_list, 0),
-    lists:foreach(fun(LookupNodeTuple) ->
-			  FirstNode = erlang:element(1, LookupNodeTuple),
-			  Table = getCacheLookupRecordTable(FirstNode),
-			  ContextBin = erlang:list_to_binary(ContextName),
-			  ListOfKeys = mnesia:dirty_all_keys(Table),
-			  ListOfContextKeys = lists:filter(
-						fun({TableContext, _}) ->
-							ContextBin == TableContext
-						end,
-						ListOfKeys
-					       ),
-			  lists:foreach(fun(ContextKey) ->
-						mnesia:dirty_delete(Table, ContextKey)
-					end,
-					ListOfContextKeys
-				       )
+    NodeListRecord = getNodeListRecord(),
+    lists:foreach(fun({LookupNodeKey, LookupNodeList}) ->
+			  LookupTable = getCacheLookupRecordTable(ContextName, LookupNodeKey),
+			  mnesia:clear_table(LookupTable)
 		  end,
 		  NodeListRecord#node_list.lookup_node_list
 		 ),
-    lists:foreach(fun(NodeTuple) ->
-			  TableFragmentName = createTableFragmentName(ContextName, erlang:element(1, NodeTuple)),
+    lists:foreach(fun({NodeKey, NodeList}) ->
+			  TableFragmentName = createTableFragmentName(ContextName, NodeKey),
 			  Table = ?MODULE:getContextAtom(TableFragmentName),
 			  mnesia:clear_table( Table ),
 			  MemFun = fun() ->
