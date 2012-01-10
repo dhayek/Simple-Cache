@@ -9,7 +9,7 @@
 -export( [ createMemoryMonitorListener/0, createMemoryPruneListener/0, monitorMemoryLoop/0, pruneMemoryLoop/0 ]  ).
 -export( [ createNodeMonitorListener/0, monitorNodeLoop/0, nodeDownFunction/2, nodeDownFunction/1  ] ).
 -export( [ createStopListener/0, stopListener/0 ]).
--export( [ getAllContexts/0, deleteNode/1, addNode/1, getTableKeys/1  ] ).
+-export( [  deleteNode/1, addNode/1, getTableKeys/1  ] ).  %% getAllContexts/0
 -export( [ deleteStaleCacheEntries/0, deleteStaleCacheEntries/1] ).
 -export( [ checkMemory/0, pruneCache/6 ] ).
 
@@ -166,18 +166,18 @@ nodeDownFunction(NodeDown) ->
     cache:deleteNode(NodeDown)
 .
 
-getAllContexts() ->
-    Fun = fun() ->
-		  mnesia:all_keys(context)
-	  end,
-    Result = mnesia:transaction(Fun),
-    case Result of
-	{atomic, ListOfContexts} ->
-	    ListOfContexts;
-	_ ->
-	    []
-    end
-.
+%%getAllContexts() ->
+%%    Fun = fun() ->
+%%		  mnesia:all_keys(context)
+%%	  end,
+%%    Result = mnesia:transaction(Fun),
+%%    case Result of
+%%	{atomic, ListOfContexts} ->
+%%	    ListOfContexts;
+%%	_ ->
+%%	    []
+%%    end
+%%.
 
 
 getTableKeys(Table) ->
@@ -196,7 +196,7 @@ getTableKeys(Table) ->
 %% createTableFragmentName(ContextName, Node) ->
 
 deleteNode(Node) ->
-    ListOfContexts = ?MODULE:getAllContexts(),
+    ListOfContexts = cache:getAllContexts(),
     [NodeListRecord] = mnesia:dirty_read(node_list, 0),
     OrigNodeList = NodeListRecord#node_list.node_list,
     NewNodeList = lists:delete(Node, OrigNodeList),
@@ -271,7 +271,7 @@ deleteNode(Node) ->
 
 
 addNode(Node) ->
-    ListOfContexts = ?MODULE:getAllContexts(),
+    ListOfContexts = cache:getAllContexts(),
     [NodeListRecord] = mnesia:dirty_read(node_list, 0),
     OrigNodeList = NodeListRecord#node_list.node_list,
     NewNodeList = OrigNodeList ++ [Node],
@@ -344,18 +344,47 @@ addNode(Node) ->
 
 
 deleteStaleCacheEntries() ->
-    ListOfContexts = ?MODULE:getAllContexts(),
+    ListOfContexts = cache:getAllContexts(),
     lists:foreach( fun(ContextName) ->
 			   ?MODULE:deleteStaleCacheEntries(ContextName)
 		   end,
 		   ListOfContexts)
 .
 
+getNodeListTupleEntryForThisNode() ->
+    NodeListTuples = cache:getNodeList(),
+    lists:foldl(fun(NodeTuple, NodeList) ->
+			case NodeListEntry of 
+			    undefined ->
+				{_, ListOfNodes} = NodeTuple,
+				case lists:member(node(), ListOfNodes) of
+				    true ->
+					NodeTuple;
+				    _ ->
+					undefined
+				end;
+			    _ ->
+				NodeTuple
+			end
+		end,
+		undefined,
+		NodeListTuples
+	       )
+.
 
 %% [key, data, store_time, last_access_time, ttl, expire_time]
 deleteStaleCacheEntries(ContextName) ->
+    NodeListTuple = getNodeListEntryForThisNode(),
+    case NodeListTuple of
+	undefined ->
+	    {error, "No node list defined for this node."};
+	_ ->
+	    deleteStaleCacheEntries(NodeListTuple, node())
+    end
+.
 
-    TableName = cache:createTableFragmentName(ContextName, node()),
+deleteStaleCacheEntries({NodeKey, [ThisNode | Rest ]}, ThisNode) ->
+    TableName = cache:createTableFragmentName(ContextName, NodeKey),
     %%io:format("tablename is ~p~n", [TableName]),
     Table = cache:getContextAtom(TableName),
     Secs = cache:secs(),
@@ -367,7 +396,6 @@ deleteStaleCacheEntries(ContextName) ->
 %%		  Res = mnesia:select(Table, [{MatchHead, [Guard], [Result]}], 50, read)
 	  end,
     Res = mnesia:transaction(Fun),
-
     %%io:format("res is ~p~n", [Res]),
     case Res of
 	{atomic, KeyList} when erlang:is_list(KeyList) ->
@@ -384,41 +412,50 @@ deleteStaleCacheEntries(ContextName) ->
 	_ ->
 	    io:format("apparently an error~n")
     end
-
-
+;
+deleteStaleCacheEntries({NodeKey, [Node | Rest ]}, ThisNode) ->
+    noop
 .
 
+
 checkMemory() ->
-    ListOfContexts = ?MODULE:getAllContexts(),
-    [NodeListRecord] = mnesia:dirty_read(node_list, 0),
+    ListOfContexts = cache:getAllContexts(),
+    NodeListRecord = cache:getNodeListRecord(),
     ListOfNodes = NodeListRecord#node_list.node_list,
     WordSize = erlang:system_info(wordsize),
     NumberOfNodes = length(ListOfNodes),
-    lists:foreach(
-      fun(ContextName) ->
-	      TableName = cache:createTableFragmentName(ContextName, node()),
-	      %%io:format("tablename is ~p~n", [TableName]),
-	      Table = cache:getContextAtom(TableName),
-	      MemUse = getMemoryUse(TableName), %% mnesia:table_info(Table, memory) * WordSize,
-	      %%io:format("memory use for table ~p is ~p~n", [TableName, MemUse]),
-	      ContextRecord = cache:getContextRecord(ContextName),
-	      case ContextRecord of
-		  undefined ->
-		      ok;
-		  _ ->
-		      AllowedMemory = ContextRecord#context.memory_allocation / NumberOfNodes,
-		      case MemUse > AllowedMemory of
-			  true ->
-			      {memory_prune, node()} ! {prune, ContextName, TableName, Table, AllowedMemory, MemUse, cache:secs()};
-			  false ->
-			      ok
+    NodeListTuple = getNodeListEntryForThisNode(),
+    case NodeListTuple of 
+	undefined ->
+	    noop;
+	_ ->
+	    {NodeKey, ListOfNodes} = NodeListTuple,
+	    lists:foreach(
+	      fun(ContextName) ->
+		      Node = lists:nth(1, ListOfNodes),
+		      TableName = cache:createTableFragmentName(ContextName, NodeKey),
+		      %%io:format("tablename is ~p~n", [TableName]),
+		      Table = cache:getContextAtom(TableName),
+		      MemUse = getMemoryUse(TableName), %% mnesia:table_info(Table, memory) * WordSize,
+		      %%io:format("memory use for table ~p is ~p~n", [TableName, MemUse]),
+		      ContextRecord = cache:getContextRecord(ContextName),
+		      case ContextRecord of
+			  undefined ->
+			      ok;
+			  _ ->
+			      AllowedMemory = ContextRecord#context.memory_allocation / NumberOfNodes,
+			      case MemUse > AllowedMemory of
+				  true ->
+				      {memory_prune, Node} ! {prune, ContextName, TableName, Table, AllowedMemory, MemUse, cache:secs()};
+				  false ->
+				      ok
+			      end
 		      end
-	      end
-      end,
-      ListOfContexts
-     )
+	      end,
+	      ListOfContexts
+	     )
+    end
 .
-
 
 pruneCache(ContextName, TableFragmentName, Table, AllowedMemory, MemUse, OlderThan) when MemUse =< AllowedMemory ->
     ok;
