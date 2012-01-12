@@ -195,14 +195,47 @@ getTableKeys(Table) ->
 
 %% createTableFragmentName(ContextName, Node) ->
 
-deleteNode(Node) ->
+deleteNode({NodeKey, ListOfNodes}) ->
     ListOfContexts = cache:getAllContexts(),
-    [NodeListRecord] = mnesia:dirty_read(node_list, 0),
+    Node = getFirstReachableNode(ListOfNodes),
+    deleteNode({NodeKey, Node}, node())
+.
+
+
+deleteNode({NodeKey, Node}, Node) ->
+    ListOfContexts = cache:getAllContexts(),
+    lists:foreach(
+      fun(ContextName) ->
+	      LocalTableFragmentName = cache:createTableFragmentName(ContextName, NodeKey),
+	      Table = cache:getContextAtom(LocalTableFragmentName),
+	      ListOfKeys = getTableKeys(Table),
+	      lists:foreach(fun(Key) ->
+				    RecordList = mnesia:dirty_read(Table, Key),
+				    case RecordList of
+					[] ->
+					    ok;
+					[Record | _ ] ->
+					    cache:reCacheRecord(ContextName, Record)
+				    end
+			    end,
+			    ListOfKeys
+			   )
+      end,
+      ListOfContexts
+     ),
+    
+    ok;
+deleteNode({NodeKey, Node}, OtherNode) ->
+    noop
+.
+
+doNothing(Node, NodeKey, ListOfContexts) ->
+    NodeListRecord = cache:getNodeListRecord(),
     OrigNodeList = NodeListRecord#node_list.node_list,
     NewNodeList = lists:delete(Node, OrigNodeList),
     lists:foreach(
       fun(ContextName) ->
-	      LocalTableFragmentName = cache:createTableFragmentName(ContextName, node()),
+	      LocalTableFragmentName = cache:createTableFragmentName(ContextName, NodeKey),
 	      Table = cache:getContextAtom(LocalTableFragmentName),
 	      ListOfKeys = getTableKeys(Table),
 	      lists:foreach(fun(Key) ->
@@ -354,7 +387,7 @@ deleteStaleCacheEntries() ->
 getNodeListTupleEntryForThisNode() ->
     NodeListTuples = cache:getNodeList(),
     lists:foldl(fun(NodeTuple, NodeList) ->
-			case NodeListEntry of 
+			case NodeList of 
 			    undefined ->
 				{_, ListOfNodes} = NodeTuple,
 				case lists:member(node(), ListOfNodes) of
@@ -374,16 +407,23 @@ getNodeListTupleEntryForThisNode() ->
 
 %% [key, data, store_time, last_access_time, ttl, expire_time]
 deleteStaleCacheEntries(ContextName) ->
-    NodeListTuple = getNodeListEntryForThisNode(),
+    NodeListTuple = getNodeListTupleEntryForThisNode(),
     case NodeListTuple of
 	undefined ->
 	    {error, "No node list defined for this node."};
 	_ ->
-	    deleteStaleCacheEntries(NodeListTuple, node())
+	    {NodeKey, ListOfNodes} = NodeListTuple,
+	    Node = getFirstReachableNode(ListOfNodes),
+	    case Node of
+		undefined ->
+		    noop;
+		_ ->
+		    deleteStaleCacheEntries(ContextName, NodeKey, Node)
+	    end
     end
 .
 
-deleteStaleCacheEntries({NodeKey, [ThisNode | Rest ]}, ThisNode) ->
+deleteStaleCacheEntries(ContextName, NodeKey, Node) ->
     TableName = cache:createTableFragmentName(ContextName, NodeKey),
     %%io:format("tablename is ~p~n", [TableName]),
     Table = cache:getContextAtom(TableName),
@@ -412,11 +452,18 @@ deleteStaleCacheEntries({NodeKey, [ThisNode | Rest ]}, ThisNode) ->
 	_ ->
 	    io:format("apparently an error~n")
     end
-;
-deleteStaleCacheEntries({NodeKey, [Node | Rest ]}, ThisNode) ->
-    noop
 .
 
+getFirstReachableNode([]) ->
+    undefined;
+getFirstReachableNode([FirstNode | Rest]) ->
+    case net_adm:ping(FirstNode) of
+	pong ->
+	    FirstNode;
+	_ ->
+	    getFirstReachableNode(Rest)
+    end
+.
 
 checkMemory() ->
     ListOfContexts = cache:getAllContexts(),
@@ -424,7 +471,7 @@ checkMemory() ->
     ListOfNodes = NodeListRecord#node_list.node_list,
     WordSize = erlang:system_info(wordsize),
     NumberOfNodes = length(ListOfNodes),
-    NodeListTuple = getNodeListEntryForThisNode(),
+    NodeListTuple = getNodeListTupleEntryForThisNode(),
     case NodeListTuple of 
 	undefined ->
 	    noop;
@@ -432,7 +479,7 @@ checkMemory() ->
 	    {NodeKey, ListOfNodes} = NodeListTuple,
 	    lists:foreach(
 	      fun(ContextName) ->
-		      Node = lists:nth(1, ListOfNodes),
+		      Node = getFirstReachableNode(ListOfNodes),
 		      TableName = cache:createTableFragmentName(ContextName, NodeKey),
 		      %%io:format("tablename is ~p~n", [TableName]),
 		      Table = cache:getContextAtom(TableName),

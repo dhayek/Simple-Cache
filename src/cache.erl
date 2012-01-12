@@ -14,7 +14,7 @@
 
 -export( [ deleteNodeTableInfo/1, resetCacheReorg/0, clearAllData/0, clearContextData/1, getAllContexts/0  ] ).
 
--export( [ createRehashedCacheDataRecord/3, addNode/1, deleteNode/1, nodeDown/1 ] ).
+-export( [writeConfDataFromNodeList/0,  createRehashedCacheDataRecord/3, addNode/1, deleteNode/1, nodeDown/1 ] ).
 
 
 init() ->
@@ -157,12 +157,12 @@ stop() ->
 .
 
 areMutuallyExclusive(L1, L2) when is_list(L1) and is_list (L2) ->
-    lists:foldl(fun(Node, IsMutuallyExclusive) ->
+    lists:foldl(fun(N, IsMutuallyExclusive) ->
 			case IsMutuallyExclusive of
 			    false ->
 				false;
 			    true ->
-				not lists:member(Node, L1)
+				not lists:member(N, L1)
 			end
 		end,
 		true,
@@ -188,6 +188,63 @@ getAllNodesFromConfigTuples(NodeListTuples, LookupNodeListTuples) ->
 
 getListOfNodeTuples() ->
     getConfData()
+.
+
+writeConfDataFromNodeList() ->
+    CacheHome = os:getenv("SCACHE_HOME"),
+    case CacheHome of
+	false ->
+	    {error, "Environment variable SCACHE_HOME not defined"};
+	_ ->
+	    ConfFile = filename:join(CacheHome, "cache2.conf"),
+	    NodeListRecord = getNodeListRecord(),
+	    OpenFileResults = file:open(ConfFile, [write]),
+	    case OpenFileResults of
+		{error, Reason} ->
+		    io:format("Error opening file: ~p~n", [Reason]);
+		{ok, IoDevice} ->
+		    io:fwrite(IoDevice, "{~n", []),
+
+		    %%
+		    %%
+		    io:fwrite(IoDevice, "\t{~n", []),
+		    io:fwrite(IoDevice, "\t\tnode_list,~n", []),
+		   
+		    NewList = lists:map(fun({Key, L}) ->
+						{"" ++ Key ++ "", L}
+					end,
+					NodeListRecord#node_list.node_list
+				       ),
+		    io:fwrite(IoDevice, "\t\t\t~p~n", [NewList]),
+
+		    io:fwrite(IoDevice, "\t},~n", []),
+
+		    %%
+		    %%
+		    io:fwrite(IoDevice, "\t{~n", []),
+		    io:fwrite(IoDevice, "\t\tcache_lookup_node_list,~n", []),
+
+		    NewLookupList = lists:map(fun({Key, L}) ->
+						{"" ++ Key ++ "", L}
+					end,
+					NodeListRecord#node_list.lookup_node_list
+				       ),
+		    io:fwrite(IoDevice, "\t\t\t~p~n", [NewLookupList]),
+
+
+		    io:fwrite(IoDevice, "\t},~n", []),
+		    
+		    %%
+		    %%
+
+
+		    io:fwrite(IoDevice, "}~n", []),
+		    io:fwrite(IoDevice, ".", []),
+		    file:close(IoDevice)
+	    end
+		    
+		    
+    end
 .
 
 getConfData() ->
@@ -268,13 +325,17 @@ put(ContextName, Key, Data) ->
 
 
 put(ContextName, Key, Data, TTL) ->
-    ReorgTuple = isCacheReorg(),
-    OrigNodeList = getNodeList(),
+    Secs = ?MODULE:secs(),
+    put(ContextName, Key, Data, Secs, Secs, TTL, Secs + TTL)
+.
+
+put(ContextName, Key, Data, StoreTime, LastAccessTime, TTL, ExpireTime) ->
+
     NodeListRec = getNodeListRecord(),
     NodeList = NodeListRec#node_list.node_list,
     LookupNodeList = NodeListRec#node_list.lookup_node_list,
     
-    CacheData = createCacheDataRecord(ContextName, Key, Data, TTL, NodeList),
+    CacheData = createCacheDataRecord(ContextName, Key, Data, StoreTime, LastAccessTime, TTL, ExpireTime),
 
     TableFragment = erlang:element(1, CacheData),
     TableFragmentName = erlang:atom_to_list(TableFragment),
@@ -291,46 +352,7 @@ put(ContextName, Key, Data, TTL) ->
 		  mnesia:write(LookupCacheRecord)
 	  end,
     mnesia:transaction( Fun )
-
-%%    case ReorgTuple of
-%%	false ->
-%%	    put(ContextName, Key, Data, TTL, OrigNodeList);
-%%	{true, ReorgType, NodeAffected, NumberOfNodes} ->	    
-%%	    NewNodeList = case ReorgType of
-%%			      "add" ->
-%%				  OrigNodeList ++ [NodeAffected];
-%%			      "delete" ->
-%%				  lists:delete(NodeAffected, OrigNodeList);
-%%			      _ ->
-%%				  OrigNodeList
-%%			  end,
-%%	    put(ContextName, Key, Data, TTL, NewNodeList)
-%%    end
-.
-
-
-
-%%put(ContextName, Key, Data, TTL, NodeList) ->
-%%    CacheData = createCacheDataRecord(ContextName, Key, Data, TTL, NodeList),
-%%    TableFragment = erlang:element(1, CacheData),
-%%    TableFragmentName = erlang:atom_to_list(TableFragment),
-%%    DataSize = size(Data),
-%%    NodeListRec = getNodeListRecord(),
-%%    Fun = fun() ->
-%%		  mnesia:write(CacheData),
-%%		  %%io:format("Cache data is ~p~n", [CacheData]),
-%%		  [FragMemoryRec] = mnesia:read(table_fragment_memory, TableFragmentName),
-%%		  CurrMemUse = FragMemoryRec#table_fragment_memory.memory_use,
-%%		  MemUse = CurrMemUse + DataSize,
-%%		  %%io:format("Curr mem use ~p;  Data size ~p~n", [CurrMemUse, DataSize]),
-%%		  NewFragMemoryRec = FragMemoryRec#table_fragment_memory{memory_use = MemUse},
-%%		  mnesia:write(NewFragMemoryRec),
-%%		  LookupCacheRecord = createLookupCacheDataRecord(ContextName, Key, TableFragmentName, NodeListRec#node_list.lookup_node_list),
-%%		  mnesia:write(LookupCacheRecord)
-%%	  end,
-%%    mnesia:transaction( Fun )
-%%.
-
+.    
 
 putFragRecord(FragmentRecord, TableFragmentName) ->
     {_, _, Data, _, _, _, _} = FragmentRecord,
@@ -347,17 +369,6 @@ putFragRecord(FragmentRecord, TableFragmentName) ->
     mnesia:transaction(Fun)
 .
 
-
-%%-record(cache_reorg, 
-%%	{
-%%	  key = 0,
-%%	  is_reorg,                %% atom - true or false
-%%	  reorg_type,              %% string - "add" or "delete"
-%%	  node_affected,           %% atom - the name of the node being added or removed
-%%	  current_number_of_nodes, %% integer value
-%%	  nodes_running_reorg      %% integer value - how many nodes are still running a reorg operation
-%%	}
-%%).
 isCacheReorg() ->
     Fun = fun() ->
 		  mnesia:read(cache_reorg, 0)
@@ -387,7 +398,6 @@ getNodeListRecord() ->
 
 deleteFragRecord(FragmentRecord, TableFragmentName) ->
     {_, _, Data, _, _, _, _} = FragmentRecord,
-    %%mnesia:dirty_delete_object(FragmentRecord),
     DataSize = size(Data),
     Fun = fun() ->
 		  mnesia:delete_object(FragmentRecord),
@@ -400,48 +410,30 @@ deleteFragRecord(FragmentRecord, TableFragmentName) ->
     mnesia:transaction(Fun)
 .
     
-		  
 createCacheDataRecord(ContextName, Key, Data, TTL) ->
+    Secs = cache:secs(),
+    createCacheDataRecord(ContextName, Key, Data, Secs, Secs, TTL, Secs + TTL)
+.
+createCacheDataRecord(ContextName, Key, Data, StoreTime, LastAccessTime, TTL, ExpireTime) ->
     Secs = secs(),
-%%    ContextRec = ?MODULE:getContextRecord(ContextName),    
-    [NodeListRecord] = mnesia:dirty_read(node_list, 0),
+    NodeListRecord = cache:getNodeListRecord(),
     ListSize = length(NodeListRecord#node_list.node_list),
     HashIndex = erlang:phash2(Key, ListSize) + 1,
     NodeTuple = lists:nth(HashIndex, NodeListRecord#node_list.node_list),
     TableFragmentName = createTableFragmentName(ContextName, erlang:element(1, NodeTuple)),
     Table = ?MODULE:getContextAtom(TableFragmentName),
-
     CacheData = {
       Table,
       Key,
       Data,
-      Secs,
-      Secs,
+      StoreTime,
+      LastAccessTime,
       TTL,
-      Secs + TTL
+      ExpireTime
      },
     CacheData
 .
 
-createCacheDataRecord(ContextName, Key, Data, TTL, ListOfNodes) ->
-    Secs = secs(),
-    ListSize = length(ListOfNodes),
-    HashIndex = erlang:phash2(Key, ListSize) + 1,
-    NodeTuple = lists:nth(HashIndex, ListOfNodes),
-    TableFragmentName = createTableFragmentName(ContextName, erlang:element(1, NodeTuple)),
-    Table = ?MODULE:getContextAtom(TableFragmentName),
-
-    CacheData = {
-      Table,
-      Key,
-      Data,
-      Secs,
-      Secs,
-      TTL,
-      Secs + TTL
-     },
-    CacheData
-.
 
 %% ContextName, Key, and TableName are all strings
 createLookupCacheDataRecord(ContextName, Key, TableName, ListOfLookupNodeTuples) ->
@@ -457,6 +449,11 @@ createLookupCacheDataRecord(ContextName, Key, TableName, ListOfLookupNodeTuples)
     }
 .
 
+reCacheRecord(ContextName, Record) ->
+    {OldTable, Key, Data, StoreTime, LastAccessTime, TTL, ExpireTime} = Record,
+    ?MODULE:put(ContextName, Key, Data, StoreTime, LastAccessTime, TTL, ExpireTime),
+    ?MODULE:delete(ContextName, Key)
+.
 
 %% [key, data, store_time, last_access_time, ttl, expire_time]
 createRehashedCacheDataRecord(ContextName, CacheDataRecord, ListOfNodeTuples) ->
@@ -480,37 +477,6 @@ createRehashedCacheDataRecord(ContextName, CacheDataRecord, ListOfNodeTuples) ->
     NewCacheData
 .
       
-
-%%get(ContextName, Key) -> 
-%%    ReorgTuple = isCacheReorg(),
-%%    OrigNodeList = getNodeList(),
-%%    case ReorgTuple of
-%%	false ->
-%%	    get(ContextName, Key, OrigNodeList);
-%%	{true, ReorgType, NodeAffected, NumberOfNodes} ->	    
-%%	    NewNodeList = case ReorgType of
-%%			      "add" ->
-%%				  OrigNodeList ++ [NodeAffected];
-%%			      "delete" ->
-%%				  lists:delete(NodeAffected, OrigNodeList);
-%%			      _ ->
-%%				  OrigNodeList
-%%			  end,
-%%	    {Data1, Data2} = {get(ContextName, Key, OrigNodeList), get(ContextName, Key, NewNodeList)},
-%%	    %%io:format("data1 and data2 are ~p ~p~n", [Data1, Data2]),
-%%	    case {Data1, Data2} of
-%%		{undefined, undefined} ->
-%%		    undefined;
-%%		{D1, undefined} ->
-%%		    D1;	
-%%		{undefined, D2} ->
-%%		    D2;
-%%		_ ->
-%%		    undefined			
-%%	    end
-%%    end
-%%.
-
 get(ContextName, Key) ->
     NodeListRec = getNodeListRecord(),
     ListSize = length(NodeListRec#node_list.lookup_node_list),
@@ -540,49 +506,6 @@ get(ContextName, Key) ->
 	    end
     end
 .
-
-%%get(ContextName, Key, ListOfNodes) ->
-%%    ContextRec = ?MODULE:getContextRecord(ContextName),
-%%    ListSize = length(ListOfNodes),
-%%    HashIndex = erlang:phash2(Key, ListSize) + 1,
-%%    NodeTuple = lists:nth(HashIndex, ListOfNodes),
-%%    TableFragmentName = createTableFragmentName(ContextName, erlang:element(1, NodeTuple)),
-%%    Table = ?MODULE:getContextAtom(TableFragmentName),
-%%
-%%    Fun = fun() ->
-%%		  mnesia:read(Table, Key)
-%%	  end,
-%%    Result = mnesia:transaction( Fun ),
-%%
-%%    case Result of
-%%	{atomic, [Data | _ ]} ->
-%%	    RetVal = erlang:element(3, Data),
-%%	    RetVal;
-%%	_ ->
-%%	    undefined
-%%    end
-%%.
-
-%%delete(ContextName, Key) ->
-%%    ReorgTuple = isCacheReorg(),
-%%    OrigNodeList = getNodeList(),
-%%
-%%    case ReorgTuple of
-%%	false ->
-%%	    delete(ContextName, Key, OrigNodeList);
-%%	{true, ReorgType, NodeAffected, NumberOfNodes} ->	    
-%%	    NewNodeList = case ReorgType of
-%%			      "add" ->
-%%				  OrigNodeList ++ [NodeAffected];
-%%			      "delete" ->
-%%				  lists:delete(NodeAffected, OrigNodeList);
-%%			      _ ->
-%%				  OrigNodeList
-%%			  end,
-%%	    delete(ContextName, Key, OrigNodeList), 
-%%	    delete(ContextName, Key, NewNodeList)
-%%    end
-%%.
 
 delete(ContextName, Key) ->
     NodeListRec = getNodeListRecord(),
@@ -619,34 +542,6 @@ delete(ContextName, Key) ->
 	    Result = mnesia:transaction( Fun )
     end
 .
-
-
-%%delete(ContextName, Key, ListOfNodes) ->
-%%    ContextRec = ?MODULE:getContextRecord(ContextName),    
-%%    ListSize = length(ListOfNodes),
-%%    HashIndex = erlang:phash2(Key, ListSize) + 1,
-%%    NodeTuple = lists:nth(HashIndex, ListOfNodes),
-%%    TableFragmentName = createTableFragmentName(ContextName, erlang:element(1, NodeTuple)),
-%%    Table = ?MODULE:getContextAtom(TableFragmentName),
-%%    
-%%    Fun = fun() ->
-%%		  QueryRes = mnesia:read(Table, Key, write),
-%%		  case QueryRes of
-%%		      [ContextFragRec | _ ] ->
-%%			  {_, _, Data, _, _, _, _} = ContextFragRec,
-%%			  DataSize = size(Data),
-%%			  mnesia:delete(Table, Key, write),
-%%			  [FragMemoryRec] = mnesia:read(table_fragment_memory, TableFragmentName),
-%%			  CurrMemUse = FragMemoryRec#table_fragment_memory.memory_use,
-%%			  MemUse = CurrMemUse - DataSize,
-%%			  NewFragMemoryRec = FragMemoryRec#table_fragment_memory{memory_use = MemUse},
-%%			  mnesia:write(NewFragMemoryRec);
-%%		      _ ->
-%%			  noop
-%%		  end
-%%	  end,
-%%    mnesia:transaction( Fun )
-%%.
 
 secs() ->
         T = now(),
@@ -689,7 +584,12 @@ addContext(ContextName) ->
 			  FragFun = fun() ->
 					    mnesia:write(TableFragmentMemoryRec)
 				    end,
-			  mnesia:transaction(FragFun)			      
+			  mnesia:transaction(FragFun),
+			  lists:foreach(fun(Node) ->
+						{config_changed_listener, Node} ! {context_added, ContextName}
+					end,
+					NodeList
+				       )
 		  end,
 		  NodeListRecord#node_list.node_list
 		 ),
@@ -702,7 +602,12 @@ addContext(ContextName) ->
 			     {ram_copies, LookupNodeList},
 			     {attributes, ?CACHE_LOOKUP_RECORD_DATA}
 			    ]
-			   )
+			   ),
+			  lists:foreach(fun(Node) ->
+						{config_changed_listener, Node} ! {context_added, ContextName}
+					end,
+					LookupNodeList
+				       )
 		  end,
 		  NodeListRecord#node_list.lookup_node_list
 		 )
@@ -722,7 +627,12 @@ deleteContext(ContextName) ->
     NodeListRecord = getNodeListRecord(),
     lists:foreach(fun({LookupNodeKey, LookupNodeList}) ->
 			  LookupTable = getCacheLookupRecordTable(ContextName, LookupNodeKey),
-			  mnesia:delete_table(LookupTable)
+			  mnesia:delete_table(LookupTable),
+			  lists:foreach(fun(Node) ->
+						{config_changed_listener, Node} ! {context_deleted, ContextName}
+					end,
+					LookupNodeList
+				       )
 		  end,
 		  NodeListRecord#node_list.lookup_node_list
 		 ),
@@ -733,7 +643,12 @@ deleteContext(ContextName) ->
 			  DelFun = fun() ->
 					   mnesia:delete(table_fragment_memory, TableFragmentName)
 				   end,
-			  mnesia:transaction(DelFun)			      
+			  mnesia:transaction(DelFun),
+			  lists:foreach(fun(Node) ->
+						{config_changed_listener, Node} ! {context_deleted, ContextName}
+					end,
+					NodeList
+				       )
 		  end,
 		  NodeListRecord#node_list.node_list
 		 )
@@ -859,40 +774,53 @@ getTableKeys(Table) ->
     end
 .
 
-
-
-
-
-
-
-%% Node is a tuple of atoms of the format {node_name1@w.x.y.z, node_name2@a.b.c.d, ...}
+%% Node is a tuple of atoms of the format {"NodeKey", [node_name1@w.x.y.z, node_name2@a.b.c.d, ...]}
 addNode(NodeTuple) when erlang:is_tuple(NodeTuple) == true ->
+
+    %% is this a valid Node Tuple?  Does the NodeKey already exists or are
+    %% any of the nodes already being used?
     io:format("checkpoint 1~n"),
-    [NodeListRecord] = mnesia:dirty_read(node_list, 0),
+    NodeListRecord = getNodeListRecord(),
     io:format("checkpoint 2~n"),
-    [CacheReorgRecord] = mnesia:dirty_read(cache_reorg, 0),
-    
-    case CacheReorgRecord#cache_reorg.is_reorg of
-	true ->
-	    {error, "Node change is in process.  Unable to add node now."};
-	false ->
-	    NodeListTuples = NodeListRecord#node_list.node_list,
-	    LookupNodeListTuples = NodeListRecord#node_list.lookup_node_list,
-	    case 
-		{areMutuallyExclusive([NodeTuple], NodeListTuples),
-		 areMutuallyExclusive([NodeTuple], LookupNodeListTuples)} of
+    case NodeTuple of
+	{NodeKey, ListOfNodes} ->
+	    ListOfNodeKeys = lists:map(fun({Key, _}) ->
+					       Key
+				       end,
+				       NodeListRecord#node_list.node_list
+				      ),
+	    ListOfCurrentNodes = getNodeListFromConfig(NodeListRecord#node_list.node_list),
+	    case {areMutuallyExclusive([NodeKey], ListOfNodeKeys), areMutuallyExclusive(ListOfNodes, ListOfCurrentNodes)} of
 		{true, true} ->
-		    addNode(erlang:tuple_to_list(NodeTuple));
-		{false, true} ->
-		    {error, "One or more of the nodes is already a member of the cache"};
-		{true, false} ->
-		    {error, "One or more of the nodes is already a member of the lookup table nodes"};
+		    NewNodeListRecord = NodeListRecord#node_list{node_list = NodeListRecord#node_list.node_list ++ [NodeTuple]},
+		    case initializeAddedNodes(NodeTuple) of
+			{error, Message} ->
+			    {error, Message};
+			ok ->
+			    Fun = fun() ->
+					  mnesia:write(NewNodeListRecord)
+				  end,
+			    mnesia:transaction(Fun),
+			    ListOfLookupNodes = getNodeListFromConfig(NewNodeListRecord#node_list.lookup_node_list),
+			    lists:foreach(fun({_, NodeList}) ->
+						  lists:foreach(fun(Node) ->
+									{config_changed_listener, Node} ! node_added
+								end,
+								NodeList
+							       )
+					  end,
+					  NewNodeListRecord#node_list.node_list ++ 
+					      NewNodeListRecord#node_list.lookup_node_list
+					 )	
+		    end;
 		_ ->
-		    {error, "One or more of the nodes is already a member of either the cache or the lookup table nodes"}
-	    end
-    end		
-;
-addNode(ListOfNodes) when erlang:is_list(ListOfNodes) == true ->    
+		    {error, "This key or one of the nodes already exists."}
+	    end;
+	_ ->
+	    {error, "Incorrect format for adding a node - should be: {NodeKey, [node1, node2, ...]}, where NodeKey is a string and nodeN is an atom."}
+    end
+.
+initializeAddedNodes({NodeKey, ListOfNodes}) when erlang:is_list(ListOfNodes) == true ->    
     case allNodesConnected(ListOfNodes) of
 	false ->
 	    {error, "Not all nodes are connectable."};
@@ -911,11 +839,11 @@ addNode(ListOfNodes) when erlang:is_list(ListOfNodes) == true ->
 				  mnesia:add_table_copy(logged_in, Node, disc_copies)
 			  end,
 			  ListOfNodes),
-	    FirstNode = lists:nth(1, ListOfNodes),
+	    %%FirstNode = lists:nth(1, ListOfNodes),
 	    ListOfContexts = getAllContexts(),
 	    lists:foreach(
 	      fun(ContextName) ->		      
-		      TableFragmentName = createTableFragmentName(ContextName, FirstNode),
+		      TableFragmentName = createTableFragmentName(ContextName, NodeKey),
 		      Table = ?MODULE:getContextAtom(TableFragmentName),
 		      mnesia:create_table(
 			Table,
@@ -942,39 +870,27 @@ addNode(ListOfNodes) when erlang:is_list(ListOfNodes) == true ->
 	      end,
 	      ListOfContexts
 	     ),
-%%	    NewCacheReorgRecord = #cache_reorg{
-%%	      key = 0,
-%%	      is_reorg = true,
-%%	      reorg_type = "add",
-%%	      node_affected = Node,
-%%	      current_number_of_nodes = length(NodeListRecord#node_list.node_list),
-%%	      nodes_running_reorg = length(NodeListRecord#node_list.node_list)
-%%	     },
-%%	    mnesia:dirty_write(NewCacheReorgRecord),
-%%	    rpc:call(Node, cache_monitor, start, []),
-%%	    lists:foreach(fun(N) ->
-%%				  {change_node_configuration, N} ! {add, Node}
-%%			  end,
-%%			  NodeListRecord#node_list.node_list
-%%			 ),
 	    ok
     end
 .
 
-deleteNodeTableInfo(Node) ->
-    deleteNodeTableFragmentInfo(Node),
-    deleteNodeTableCopyInfo(Node),
+deleteNodeTableInfo({NodeKey, ListOfNodes}) ->
+    deleteNodeTableFragmentInfo(NodeKey),
+    lists:foreach(fun(Node) ->
+			  deleteNodeTableCopyInfo(Node)
+		  end,
+		  ListOfNodes
+		 ),
     ok
 .
 
-deleteNodeTableFragmentInfo(Node) ->
+deleteNodeTableFragmentInfo(NodeKey) ->
     ListOfContexts = getAllContexts(),
     lists:foreach(
       fun(ContextName) ->
-	      TableFragmentName = createTableFragmentName(ContextName, Node),
+	      TableFragmentName = createTableFragmentName(ContextName, NodeKey),
 	      Table = ?MODULE:getContextAtom(TableFragmentName),
-	      mnesia:delete_table(Table),
-	      
+	      mnesia:delete_table(Table),	      
 	      FragFun = fun() ->
 				mnesia:delete(table_fragment_memory, TableFragmentName, write)
 			end,
@@ -995,38 +911,43 @@ deleteNodeTableCopyInfo(Node) ->
     mnesia:del_table_copy(schema, Node)
 .    
 
-deleteNode(Node) when erlang:is_atom(Node) == true ->
+deleteNode(NodeKey)  ->
     io:format("checkpoint 1~n"),
-    [NodeListRecord] = mnesia:dirty_read(node_list, 0),
+    NodeListRecord = getNodeListRecord(),
     io:format("checkpoint 2~n"),
-    [CacheReorgRecord] = mnesia:dirty_read(cache_reorg, 0),
-    
-    case CacheReorgRecord#cache_reorg.is_reorg of
-	true ->
-	    {error, "Node change is in process.  Unable to delete node now."};
+
+    ListOfCurrentNodes = getNodeListFromConfig(NodeListRecord#node_list.node_list),
+    ListOfNodeKeys = lists:map(fun({Key, _}) ->
+				       Key
+			       end,
+			       NodeListRecord#node_list.node_list
+			      ),
+    case lists:member(NodeKey, ListOfNodeKeys) of
 	false ->
-	    NodeList = NodeListRecord#node_list.node_list,
-	    case lists:member(Node, NodeList) of
-		false ->
-		    {error, "Node is not a member of the cache"};
-		true ->
-		    io:format("checkpoint 3~n"),
-		    NewCacheReorgRecord = #cache_reorg{
-		      key = 0,
-		      is_reorg = true,
-		      reorg_type = "delete",
-		      node_affected = Node,
-		      current_number_of_nodes = length(NodeListRecord#node_list.node_list),
-		      nodes_running_reorg = length(NodeListRecord#node_list.node_list)
-		     },
-		    mnesia:dirty_write(NewCacheReorgRecord),
-		    lists:foreach(fun(N) ->
-					  {change_node_configuration, N} ! {delete, Node}
-				  end,
-				  NodeListRecord#node_list.node_list
-				 ),
-		    ok
-	    end
+	    {error, "The node key " ++ NodeKey ++ " is not configured in this cache"};
+	true ->
+	    NodeTuple = lists:keyfind(NodeKey, 1, NodeListRecord#node_list.node_list),
+	    NewNodeListTuples = lists:keydelete(NodeKey, 1, NodeListRecord#node_list.node_list),
+	    NewNodeListRecord = NodeListRecord#node_list{node_list = NewNodeListTuples},
+	    Fun = fun() -> 
+			  mnesia:write(NewNodeListRecord)
+		  end,
+	    mnesia:transaction(Fun),
+	    {_, ListOfDeletedNodes} = NodeTuple,
+	    lists:foreach(fun(Node) ->
+				  {node_deleted_listener, Node} ! {delete, NodeTuple}
+			  end,
+			  ListOfDeletedNodes
+			 ),
+	    lists:foreach(fun({_, ListOfNodes}) ->
+				  lists:foreach(fun(Node) ->
+							{config_changed_listener, Node} ! node_deleted
+						end,
+						ListOfNodes
+					       ),
+				  NewNodeListRecord#node_list.node_list ++ NewNodeListRecord#node_list.node_list
+			  end
+			 )
     end
 .
 
