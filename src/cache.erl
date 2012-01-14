@@ -8,10 +8,10 @@
 -export([init/0, initForceNew/0,  start/0,  stop/0, listToAtom/1]).
 
 
--export([ put/3, put/4, get/2, delete/2, putFragRecord/2, deleteFragRecord/2, secs/0 ]).
--export( [ getNodeList/0, createTableFragmentName/2, createContext/1, deleteContext/1, 
+-export([ put/3, put/4, put/7, get/2, delete/2, putFragRecord/2, deleteFragRecord/2, secs/0 ]).
+-export( [ getNodeList/0, getNodeListRecord/0, createTableFragmentName/2, createContext/1, deleteContext/1, 
 	   contextExists/1, getContextRecord/1, getContextAtom/1, isCacheReorg/0 ]).
-
+-export( [ deleteNodeTableCopyInfo/1, deleteNodeTableFragmentInfo/1, reCacheRecord/2  ] ).
 -export( [ deleteNodeTableInfo/1, resetCacheReorg/0, clearAllData/0, clearContextData/1, getAllContexts/0  ] ).
 
 -export( [writeConfDataFromNodeList/0,  createRehashedCacheDataRecord/3, addNode/1, deleteNode/1, nodeDown/1 ] ).
@@ -41,11 +41,17 @@ init() ->
 					  AllNodes),    
 			    cache_data_ddl:createCacheTables(AllNodes),
 			    NodeListRec = #node_list{node_list = NodeListTuples, lookup_node_list = LookupNodeListTuples},
-			    mnesia:dirty_write(node_list, NodeListRec),
+			    Fun = fun() ->
+					  mnesia:write(NodeListRec)
+				  end,
+			    mnesia:transaction(Fun),
+%%			    mnesia:dirty_write(node_list, NodeListRec),
+			    mnesia:force_load_table(node_list),
 			    CacheReorgRec = #cache_reorg{is_reorg=false, reorg_type="", node_affected=undefined, 
 							 current_number_of_nodes = length(AllNodes),
 							 nodes_running_reorg = 0},
 			    mnesia:dirty_write(cache_reorg, CacheReorgRec),
+			    mnesia:force_load_table(cache_reorg),
 			    lists:foreach(fun(ContextConfig) ->
 						  {ContextName, UseHeader, HeaderValue, UseSecure, DefaultTTL, MemoryAllocation} = ContextConfig,
 						  ContextRec = #context{
@@ -58,11 +64,11 @@ init() ->
 						  ?MODULE:createContext(ContextRec),
 						  createCacheLookupTables(ContextName, LookupNodeListTuples)
 					  end,
-					  ListOfContexts)
-			    %%lists:foreach(fun(Node) ->
-			%%			  rpc:call(Node, cache_monitor, start, [])
-			%%		  end,
-			%%		  AllNodes),
+					  ListOfContexts),
+			    lists:foreach(fun(Node) ->
+						  rpc:call(Node, cache_monitor, start, [])
+					  end,
+					  AllNodes)
 		    end
 	    end
     end
@@ -136,24 +142,36 @@ start(ListOfNodes) when erlang:is_list(ListOfNodes) ->
 				  rpc:call(Node, mnesia, start, [])
 			  end,
 			  ListOfNodes),
+	    mnesia:force_load_table(node_list),
+	    mnesia:force_load_table(context),
+	    initTableFragmentMemoryData(),
 	    lists:foreach(fun(Node) ->
 				  rpc:call(Node, cache_monitor, start, [])
 			  end,
 			  ListOfNodes),
-	    mnesia:force_load_table(node_list),
-	    mnesia:force_load_table(context),
-	    initTableFragmentMemoryData(),
 	    ok
     end
 .
 
 stop() ->
-    cache_monitor:stop(),
+    NodeListRec = getNodeListRecord(),
+    NodeList = lists:foldl(fun({_, L}, Acc) ->
+				   Acc ++ L
+			   end,
+			   [],
+			   NodeListRec#node_list.node_list
+			  ),
+    LookupNodeList = lists:foldl(fun({_, L}, Acc) ->
+					 Acc ++ L
+				 end,
+				 [],
+				 NodeListRec#node_list.lookup_node_list
+				),
+    AllNodes = NodeList ++ LookupNodeList,
     lists:foreach(fun(Node) ->
 			  rpc:call(Node, cache_monitor, stop, [])
 		  end,
-		  nodes())
-%%    {delete_node, node()} ! stop
+		  AllNodes)
 .
 
 areMutuallyExclusive(L1, L2) when is_list(L1) and is_list (L2) ->
@@ -196,7 +214,7 @@ writeConfDataFromNodeList() ->
 	false ->
 	    {error, "Environment variable SCACHE_HOME not defined"};
 	_ ->
-	    ConfFile = filename:join(CacheHome, "cache2.conf"),
+	    ConfFile = filename:join(CacheHome, "cache.conf"),
 	    NodeListRecord = getNodeListRecord(),
 	    OpenFileResults = file:open(ConfFile, [write]),
 	    case OpenFileResults of
@@ -204,47 +222,63 @@ writeConfDataFromNodeList() ->
 		    io:format("Error opening file: ~p~n", [Reason]);
 		{ok, IoDevice} ->
 		    io:fwrite(IoDevice, "{~n", []),
-
-		    %%
-		    %%
 		    io:fwrite(IoDevice, "\t{~n", []),
+
 		    io:fwrite(IoDevice, "\t\tnode_list,~n", []),
-		   
 		    NewList = lists:map(fun({Key, L}) ->
 						{"" ++ Key ++ "", L}
 					end,
 					NodeListRecord#node_list.node_list
 				       ),
-		    io:fwrite(IoDevice, "\t\t\t~p~n", [NewList]),
-
+		    io:fwrite(IoDevice, "\t\t[~n", []),
+		    printListElement(IoDevice, "\t\t\t", NewList),
+		    io:fwrite(IoDevice, "\t\t]~n", []),
 		    io:fwrite(IoDevice, "\t},~n", []),
 
-		    %%
-		    %%
+
 		    io:fwrite(IoDevice, "\t{~n", []),
 		    io:fwrite(IoDevice, "\t\tcache_lookup_node_list,~n", []),
-
 		    NewLookupList = lists:map(fun({Key, L}) ->
 						{"" ++ Key ++ "", L}
 					end,
 					NodeListRecord#node_list.lookup_node_list
 				       ),
-		    io:fwrite(IoDevice, "\t\t\t~p~n", [NewLookupList]),
-
-
+		    io:fwrite(IoDevice, "\t\t[~n", []),
+		    printListElement(IoDevice, "\t\t\t", NewLookupList),
+		    io:fwrite(IoDevice, "\t\t]~n", []),
 		    io:fwrite(IoDevice, "\t},~n", []),
-		    
-		    %%
-		    %%
 
+		    io:fwrite(IoDevice, "\t{~n", []),
+
+		    io:fwrite(IoDevice, "\t\tcontexts,~n", []),
+		    ListOfContextKeys = getAllContexts(),
+		    ListOfContextRecs = lists:map(fun(ContextName) ->
+							  [Rec] = mnesia:dirty_read(context, ContextName),
+							  {_, _, UseHeader, HeaderVal, UseSecure, TTL, MemSize} = Rec,
+							  {"" ++ ContextName ++ "", UseHeader, "" ++ HeaderVal,
+							   UseSecure, TTL, MemSize}
+						  end,
+						  ListOfContextKeys
+						 ),
+		    io:fwrite(IoDevice, "\t\t[~n", []),
+		    printListElement(IoDevice, "\t\t\t", ListOfContextRecs),
+		    io:fwrite(IoDevice, "\t\t]~n", []),
+		    io:fwrite(IoDevice, "\t}~n", []),
 
 		    io:fwrite(IoDevice, "}~n", []),
 		    io:fwrite(IoDevice, ".", []),
 		    file:close(IoDevice)
 	    end
-		    
-		    
     end
+.
+
+printListElement(IoDevice, Prefix, L) when length(L) == 1 ->
+    [Elem] = L,
+    io:fwrite(IoDevice, Prefix ++ "~p~n", [Elem])
+;
+printListElement(IoDevice, Prefix, [FirstElem | Rest]) ->
+    io:fwrite(IoDevice, Prefix ++ "~p,~n", [FirstElem]),
+    printListElement(IoDevice, Prefix, Rest)
 .
 
 getConfData() ->
@@ -258,7 +292,7 @@ getConfData() ->
 	    case FileContents of
 		{ok, FileBin} ->
 		    FileStr = erlang:binary_to_list(FileBin),
-		    io:format("FileStr ~p~n", [FileStr]),
+%%		    io:format("FileStr ~p~n", [FileStr]),
 		    {ok, Scanned, _} = erl_scan:string(FileStr),
 		    {ok, Parsed} = erl_parse:parse_exprs(Scanned),
 		    {value, ListOfNodeTuples, _} = erl_eval:exprs(Parsed, []),
@@ -451,8 +485,8 @@ createLookupCacheDataRecord(ContextName, Key, TableName, ListOfLookupNodeTuples)
 
 reCacheRecord(ContextName, Record) ->
     {OldTable, Key, Data, StoreTime, LastAccessTime, TTL, ExpireTime} = Record,
-    ?MODULE:put(ContextName, Key, Data, StoreTime, LastAccessTime, TTL, ExpireTime),
-    ?MODULE:delete(ContextName, Key)
+    ?MODULE:put(ContextName, Key, Data, StoreTime, LastAccessTime, TTL, ExpireTime)
+    %%?MODULE:delete(ContextName, Key)
 .
 
 %% [key, data, store_time, last_access_time, ttl, expire_time]
@@ -934,7 +968,11 @@ deleteNode(NodeKey)  ->
 		  end,
 	    mnesia:transaction(Fun),
 	    {_, ListOfDeletedNodes} = NodeTuple,
+	    io:format("list of delete nodes is ~p~n", [ListOfDeletedNodes]),
+
 	    lists:foreach(fun(Node) ->
+				  io:format("Send delete to ~p~n", [Node]),
+				  {node_deleted_listener, Node} ! {"this is a messaage"},
 				  {node_deleted_listener, Node} ! {delete, NodeTuple}
 			  end,
 			  ListOfDeletedNodes
@@ -944,9 +982,9 @@ deleteNode(NodeKey)  ->
 							{config_changed_listener, Node} ! node_deleted
 						end,
 						ListOfNodes
-					       ),
-				  NewNodeListRecord#node_list.node_list ++ NewNodeListRecord#node_list.node_list
-			  end
+					       )
+			  end,
+			  NewNodeListRecord#node_list.node_list ++ NewNodeListRecord#node_list.node_list
 			 )
     end
 .

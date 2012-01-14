@@ -3,27 +3,27 @@
 -include_lib("cache.hrl").
 
 -export( [ start/0, stop/0, getAllCacheInfo/0, getContextCacheInfo/1, 
-	   createNodeConfigurationChangeListener/0, changeConfigurationLoop/0 ] ).
+	   createNodeConfigurationChangeListener/0 ] ). %%changeConfigurationLoop/0 ] ).
 
 -export( [ createListeners/0, createStaleCacheEntriesListener/0, deleteStaleCacheEntriesLoop/0 ] ).
+-export( [ createNodeDeletedListener/0, configChangedLoop/0 ] ).
 -export( [ createMemoryMonitorListener/0, createMemoryPruneListener/0, monitorMemoryLoop/0, pruneMemoryLoop/0 ]  ).
--export( [ createNodeMonitorListener/0, monitorNodeLoop/0, nodeDownFunction/2, nodeDownFunction/1  ] ).
+-export( [ createNodeMonitorListener/0, monitorNodeLoop/0, nodeDownFunction/2, nodeDownFunction/1, monitorNodeDeletion/0  ] ).
 -export( [ createStopListener/0, stopListener/0 ]).
--export( [  deleteNode/1, addNode/1, getTableKeys/1  ] ).  %% getAllContexts/0
+-export( [  deleteNode/1,  getTableKeys/1  ] ).  %% getAllContexts/0, addNode/1,
 -export( [ deleteStaleCacheEntries/0, deleteStaleCacheEntries/1] ).
--export( [ checkMemory/0, pruneCache/6 ] ).
+-export( [ checkMemory/0, pruneCache/6, getNodeListTupleEntryForThisNode/0 ] ).
 
 -export( [ tableInfo/2,  getCacheUseSummary/0, getCacheMemoryUse/0, getCacheObjectsInCache/0, 
 	   getCacheContextUseSummary/1, getCacheContextMemoryUse/1, getCacheContextObjectsInCache/1 ] ).
 
 
 start() ->
+    io:format("will create listeners~n"),
     createListeners()
-%%    createNodeConfigurationChangeListener()
 .
 
 stop() ->
-%%    {change_node_configuration, node()} ! stop,
     {stop_listener, node()} ! stop
 .
 
@@ -39,7 +39,8 @@ createListeners() ->
     ?MODULE:createStaleCacheEntriesListener(),
     ?MODULE:createMemoryMonitorListener(),
     ?MODULE:createMemoryPruneListener(),
-    ?MODULE:createNodeMonitorListener(),
+    ?MODULE:createNodeDeletedListener(),
+    %%?MODULE:createNodeMonitorListener(),
     ?MODULE:createStopListener()
 .
 
@@ -49,18 +50,21 @@ createStopListener() ->
 stopListener() ->
     receive
 	stop ->
-	    {change_node_configuration, node()} ! stop,
+	    {config_changed_listener, node()} ! stop,
 	    {delete_stale_entries, node()} ! stop,
 	    {memory_monitor, node()} ! stop,
-	    {memory_prune, node()} ! stop,
-	    {node_monitor, node()} ! stop;
+	    {node_deleted_listener, node()} ! stop,
+	    {memory_prune, node()} ! stop;	
+	    %%{node_monitor, node()} ! stop;
 	_ ->
 	    stopListener()
     end
 .
 
+
+%% {node_deleted_listener, Node} ! {delete, NodeTuple}
 createNodeConfigurationChangeListener() ->
-    register(change_node_configuration, spawn(?MODULE, changeConfigurationLoop, []))
+    register(config_changed_listener, spawn(?MODULE, configChangedLoop, []))
 .
 createStaleCacheEntriesListener() ->
     register(delete_stale_entries, spawn(?MODULE, deleteStaleCacheEntriesLoop, []))
@@ -75,20 +79,76 @@ createNodeMonitorListener() ->
     register(node_monitor, spawn(?MODULE, monitorNodeLoop, [])),
     {node_monitor, node()} ! start
 .
+createNodeDeletedListener() ->
+    io:format("willcreate nodeDeltedListener~n"),
+    register(node_deleted_listener, spawn(?MODULE, monitorNodeDeletion, []))
+%%    {node_deleted_listener, node()} ! start
+.
 
-changeConfigurationLoop() ->
+
+configChangedLoop() ->
     receive
 	{delete, Node} ->
 	    io:format("Node ~p recieved delete message for Node ~p~n", [node(), Node]),
 	    ?MODULE:deleteNode(Node),
-	    changeConfigurationLoop();
+	    configChangedLoop();
 	{add, Node} ->
 	    io:format("Node ~p recieved add message for Node ~p~n", [node(), Node]),
 	    ?MODULE:addNode(Node),
-	    changeConfigurationLoop();
+	    configChangedLoop();
+	node_added ->
+	    io:format("Node added.  ~p will respond.~n", [node()]),
+	    changeConfig({node_added}),
+	    configChangedLoop();
+	node_deleted ->
+	    io:format("Node deleted.  ~p will respond.~n", [node()]),
+	    changeConfig({node_deleted}),
+	    configChangedLoop();
+	{context_added, ContextName} ->
+	    io:format("context added.  ~p will respond.~n", [node()]),
+	    changeConfig({context_added, ContextName}),
+	    configChangedLoop();
+	{context_deleted, ContextName} ->
+	    io:format("context deleted.  ~p will respond.~n", [node()]),
+	    changeConfig({context_deleted, ContextName}),
+	    configChangedLoop();
 	stop ->
 	    io:format("Node ~p recieved stop changeConfiguration message~n", [node()]),
 	    ok
+    end
+.
+
+changeConfig({node_added}) ->
+    cache:writeConfDataFromNodeList(),
+    ok
+    ;
+changeConfig({node_deleted}) ->
+    cache:writeConfDataFromNodeList(),
+    ok;
+changeConfig({context_added, ContextName}) ->
+    cache:writeConfDataFromNodeList(),
+    ok;
+changeConfig({context_deleted, ContextName}) ->
+    cache:writeConfDataFromNodeList(),
+    ok
+.
+
+monitorNodeDeletion() ->
+    io:format("will start receive for node deletion~n"),
+    receive
+	{delete, NodeTuple} ->
+	    io:format("node ~p will delete~n", [node()]),
+	    deleteNode(NodeTuple),	    
+	    ok;
+	stop ->
+	    io:format("Node ~p recieved stop monitorNodeDeletion message~n", [node()]),
+	    ok;
+	go ->
+	    io:format("will go ~n"),
+	    monitorNodeDeletion();
+	_ ->
+	    io:format("got a random message~n"),
+	    monitorNodeDeletion()	    
     end
 .
 
@@ -166,20 +226,6 @@ nodeDownFunction(NodeDown) ->
     cache:deleteNode(NodeDown)
 .
 
-%%getAllContexts() ->
-%%    Fun = fun() ->
-%%		  mnesia:all_keys(context)
-%%	  end,
-%%    Result = mnesia:transaction(Fun),
-%%    case Result of
-%%	{atomic, ListOfContexts} ->
-%%	    ListOfContexts;
-%%	_ ->
-%%	    []
-%%    end
-%%.
-
-
 getTableKeys(Table) ->
     Fun = fun() ->
 		  mnesia:all_keys(Table)
@@ -193,19 +239,20 @@ getTableKeys(Table) ->
     end
 .
 
-%% createTableFragmentName(ContextName, Node) ->
-
 deleteNode({NodeKey, ListOfNodes}) ->
+    io:format("will delete this node~n"),
     ListOfContexts = cache:getAllContexts(),
     Node = getFirstReachableNode(ListOfNodes),
-    deleteNode({NodeKey, Node}, node())
+    deleteNode({NodeKey, Node, ListOfNodes}, node())
+%%    
 .
 
 
-deleteNode({NodeKey, Node}, Node) ->
+deleteNode({NodeKey, Node, ListOfNodes}, Node) ->
     ListOfContexts = cache:getAllContexts(),
     lists:foreach(
       fun(ContextName) ->
+	      io:format("will recache for Context~p~n", [ContextName]),
 	      LocalTableFragmentName = cache:createTableFragmentName(ContextName, NodeKey),
 	      Table = cache:getContextAtom(LocalTableFragmentName),
 	      ListOfKeys = getTableKeys(Table),
@@ -223,158 +270,12 @@ deleteNode({NodeKey, Node}, Node) ->
       end,
       ListOfContexts
      ),
-    
-    ok;
-deleteNode({NodeKey, Node}, OtherNode) ->
+    cache:deleteNodeTableInfo({NodeKey, ListOfNodes}),
+    ok
+;
+deleteNode({NodeKey, Node, _}, OtherNode) ->
     noop
 .
-
-doNothing(Node, NodeKey, ListOfContexts) ->
-    NodeListRecord = cache:getNodeListRecord(),
-    OrigNodeList = NodeListRecord#node_list.node_list,
-    NewNodeList = lists:delete(Node, OrigNodeList),
-    lists:foreach(
-      fun(ContextName) ->
-	      LocalTableFragmentName = cache:createTableFragmentName(ContextName, NodeKey),
-	      Table = cache:getContextAtom(LocalTableFragmentName),
-	      ListOfKeys = getTableKeys(Table),
-	      lists:foreach(fun(Key) ->
-				    RecordList = mnesia:dirty_read(Table, Key),
-				    case RecordList of
-					[] ->
-					    ok;
-					[Record | _ ] ->
-					    NewRecord = cache:createRehashedCacheDataRecord(ContextName, Record, NewNodeList),
-					    case Record == NewRecord of
-						true ->
-						    ok;
-						false ->
-						    NewTable = erlang:element(1, NewRecord),
-						    NewTableName = erlang:atom_to_list(NewTable),
-						    cache:putFragRecord(NewRecord, NewTableName),
-						    cache:deleteFragRecord(Record, LocalTableFragmentName)
-					    end
-				    end
-			    end,
-			    ListOfKeys
-			   )
-      end,
-      ListOfContexts
-     ),
-    UpdateTablesFun = fun() ->
-			      [CacheReorgRecord] = mnesia:read(cache_reorg, 0),
-			      [NodeListRecord] = mnesia:read(node_list, 0),
-			      
-			      NodesRunning = CacheReorgRecord#cache_reorg.nodes_running_reorg,
-			      case NodesRunning == 1 of 
-				  true ->
-				      NewCacheReorgRecord = #cache_reorg{
-					key = 0,
-					is_reorg = false,
-					reorg_type = "",
-					node_affected = undefined,
-					current_number_of_nodes = length(NodeListRecord#node_list.node_list) - 1,
-					nodes_running_reorg = 0
-				       },
-				      mnesia:write(NewCacheReorgRecord),
-				      NewNodeList = lists:delete(Node, NodeListRecord#node_list.node_list),
-				      NewNodeListRecord = NodeListRecord#node_list{node_list = NewNodeList},
-				      io:format("--- in delete node:  new cachereorgrecord is: ~p~n", [NewCacheReorgRecord]),
-				      mnesia:write(NewNodeListRecord),
-				      cache:deleteNodeTableInfo(Node);				  
-				  false ->
-				      case NodesRunning > 1 of
-					  true ->
-					      %%NodesRunning = CacheReorgRecord#cache_reorg.nodes_running_reorg,
-					      UnfinishedCacheReorgRecord = CacheReorgRecord#cache_reorg{
-						key = 0,
-						nodes_running_reorg = NodesRunning - 1
-					       },
-					      io:format("new cachereorgrecord is: ~p~n", [UnfinishedCacheReorgRecord]),
-					      mnesia:write(UnfinishedCacheReorgRecord);
-					  false ->
-					      noop
-				      end
-			      end
-		      end,
-    mnesia:transaction(UpdateTablesFun)								 
-.
-
-
-
-
-addNode(Node) ->
-    ListOfContexts = cache:getAllContexts(),
-    [NodeListRecord] = mnesia:dirty_read(node_list, 0),
-    OrigNodeList = NodeListRecord#node_list.node_list,
-    NewNodeList = OrigNodeList ++ [Node],
-    lists:foreach(
-      fun(ContextName) ->
-	      LocalTableFragmentName = cache:createTableFragmentName(ContextName, node()),
-	      Table = cache:getContextAtom(LocalTableFragmentName),
-	      ListOfKeys = getTableKeys(Table),
-	      lists:foreach(fun(Key) ->
-				    RecordList = mnesia:dirty_read(Table, Key),
-				    case RecordList of
-					[] ->
-					    ok;
-					[Record | _ ] ->
-					    NewRecord = cache:createRehashedCacheDataRecord(ContextName, Record, NewNodeList),
-					    case Record == NewRecord of
-						true ->
-						    ok;
-						false ->
-						    NewTable = erlang:element(1, NewRecord),
-						    NewTableName = erlang:atom_to_list(NewTable),
-						    cache:putFragRecord(NewRecord, NewTableName),
-						    cache:deleteFragRecord(Record, LocalTableFragmentName)
-					    end
-				    end
-			    end,
-			    ListOfKeys
-			   )
-      end,
-      ListOfContexts
-     ),
-    UpdateTablesFun = fun() ->
-			      [CacheReorgRecord] = mnesia:read(cache_reorg, 0),
-			      [NodeListRecord] = mnesia:read(node_list, 0),
-			      
-			      NodesRunning = CacheReorgRecord#cache_reorg.nodes_running_reorg,
-			      case NodesRunning == 1 of 
-				  true ->
-				      NewCacheReorgRecord = #cache_reorg{
-					key = 0,
-					is_reorg = false,
-					reorg_type = "",
-					node_affected = undefined,
-					current_number_of_nodes = length(NodeListRecord#node_list.node_list) + 1,
-					nodes_running_reorg = 0
-				       },
-				      mnesia:write(NewCacheReorgRecord),
-				      NewNodeList = NodeListRecord#node_list.node_list ++ [Node],
-				      NewNodeListRecord = NodeListRecord#node_list{node_list = NewNodeList},
-				      io:format("--- new cachereorgrecord is: ~p~n", [NewCacheReorgRecord]),
-				      mnesia:write(NewNodeListRecord);
-				  false ->
-				      io:format("in addNode: NodesRunning ~p~n", [NodesRunning]),
-				      case NodesRunning > 1 of
-					  true ->
-					      %%NodesRunning = CacheReorgRecord#cache_reorg.nodes_running_reorg,
-					      UnfinishedCacheReorgRecord = CacheReorgRecord#cache_reorg{
-						key = 0,
-						nodes_running_reorg = NodesRunning - 1
-					       },
-					      io:format("new cachereorgrecord is: ~p~n", [UnfinishedCacheReorgRecord]),
-					      mnesia:write(UnfinishedCacheReorgRecord);
-					  false ->
-					      noop
-				      end
-			      end
-		      end,
-    mnesia:transaction(UpdateTablesFun)
-.
-
 
 deleteStaleCacheEntries() ->
     ListOfContexts = cache:getAllContexts(),
@@ -386,8 +287,8 @@ deleteStaleCacheEntries() ->
 
 getNodeListTupleEntryForThisNode() ->
     NodeListTuples = cache:getNodeList(),
-    lists:foldl(fun(NodeTuple, NodeList) ->
-			case NodeList of 
+    lists:foldl(fun(NodeTuple, N) ->
+			case N of 
 			    undefined ->
 				{_, ListOfNodes} = NodeTuple,
 				case lists:member(node(), ListOfNodes) of
@@ -397,7 +298,7 @@ getNodeListTupleEntryForThisNode() ->
 					undefined
 				end;
 			    _ ->
-				NodeTuple
+				N
 			end
 		end,
 		undefined,
@@ -468,9 +369,9 @@ getFirstReachableNode([FirstNode | Rest]) ->
 checkMemory() ->
     ListOfContexts = cache:getAllContexts(),
     NodeListRecord = cache:getNodeListRecord(),
-    ListOfNodes = NodeListRecord#node_list.node_list,
+    ListOfNodeTuples = NodeListRecord#node_list.node_list,
     WordSize = erlang:system_info(wordsize),
-    NumberOfNodes = length(ListOfNodes),
+    NumberOfNodes = length(ListOfNodeTuples),
     NodeListTuple = getNodeListTupleEntryForThisNode(),
     case NodeListTuple of 
 	undefined ->
