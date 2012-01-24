@@ -16,7 +16,7 @@ out(Arg) ->
 %%    io:format("Others is ~p~n", [Others]),
 %%    {http_header,0,"X-Ecache-Header",undefined,"asdf"}
     {RequestHasHeader, RequestHeader}  = 
-	case lists:keyfind("X-Ecache-Header", 3, Others) of
+	case lists:keyfind("X-Scache-Header", 3, Others) of
 	    false ->
 		{false, ""};
 	    {_, _, _, _, HeaderVal} ->
