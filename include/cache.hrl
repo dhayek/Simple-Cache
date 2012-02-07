@@ -29,7 +29,7 @@
 -record(context, 
 	{
 	  context_name,        %% string value, which is used in the url to identify the type of object being cached: e.g. /cache/mycontext/mykey
-	  use_header,          %% boolean: should the http header x-icache-header be used for validation?
+	  use_header,          %% boolean: should the http header x-scache-header be used for validation?
 	  header_value,        %% http header value for authentication.  The http header x-icache-header of the caller needs to be set to this
 	  use_secure,          %% boolean indicating whether these need to be secure transactions
 	  default_ttl,         %% in seconds, how long should the cache data be stored
